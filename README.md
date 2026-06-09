@@ -1,9 +1,5 @@
 # Hermes — Distributed Order Fulfillment Engine
 
-> Named for the Greek god of commerce and delivery — and a sibling to [Argus](https://github.com/VarunKarthikjakkamputi14072/Argus),
-> which runs the same producer → broker → worker → store pipeline in Python. Hermes
-> ports those ideas into the enterprise Java stack: **Spring Boot, JPA/Hibernate,
-> PostgreSQL and Apache Kafka.**
 
 A microservices order processor built for the thing enterprise backends actually
 get judged on: **reliable, high-throughput transaction processing.** An API accepts
