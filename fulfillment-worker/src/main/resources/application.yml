@@ -1,0 +1,55 @@
+server:
+  port: 8081
+
+hermes:
+  worker:
+    # number of concurrent listener threads (== partitions consumed in parallel)
+    concurrency: 3
+
+spring:
+  application:
+    name: fulfillment-worker
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/hermes}
+    username: ${DB_USER:hermes}
+    password: ${DB_PASSWORD:hermes}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: fulfilment-workers
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.hermes.common.event.OrderPlacedEvent
+        spring.json.trusted.packages: com.hermes.common.event
+        max.poll.records: 100
+    listener:
+      ack-mode: record
+    # producer used only by the dead-letter publisher
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: fulfillment-worker
+    distribution:
+      # publish histogram buckets for the listener timer so the dashboard's
+      # p99 processing-latency panel has data to compute quantiles from
+      percentiles-histogram:
+        spring.kafka.listener: true
+  endpoint:
+    health:
+      show-details: always
