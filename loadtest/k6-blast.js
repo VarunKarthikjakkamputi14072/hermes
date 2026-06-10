@@ -9,7 +9,7 @@ import { Counter } from 'k6/metrics';
 //   k6 run -e RATE=500 -e DURATION=2m loadtest/k6-blast.js
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const RATE = parseInt(__ENV.RATE || '200');        // orders per second
+const RATE = parseInt(__ENV.RATE || '150');        // orders per second (safe default for a 4 CPU / 8 GB Docker VM)
 const DURATION = __ENV.DURATION || '60s';
 const SKU_COUNT = parseInt(__ENV.SKU_COUNT || '200'); // matches the seeded catalogue
 

@@ -69,6 +69,12 @@ docker compose up --build
 This brings up Postgres, Kafka, both services, kafka-exporter, Prometheus and
 Grafana. The API seeds a 200-SKU synthetic catalogue on first boot.
 
+> **Give the Docker VM enough memory.** The stack runs Postgres, Kafka, two JVMs,
+> Prometheus and Grafana together — on a 2 GB VM, Kafka gets OOM-killed under load
+> (`Exited (137)`) and orders stop draining. Allocate at least **4 CPU / 8 GB**.
+> On colima: `colima stop && colima start --cpu 4 --memory 8` (resources only
+> apply on a fresh start). Docker Desktop: Settings → Resources.
+
 | Service    | URL                                            |
 |------------|------------------------------------------------|
 | Order API  | http://localhost:8080/api/orders               |
@@ -89,7 +95,7 @@ curl http://localhost:8080/api/orders/stats
 ## The demo: blast it and watch the lag
 
 ```bash
-# 200 orders/sec for 60s (defaults)
+# 150 orders/sec for 60s (defaults)
 k6 run loadtest/k6-blast.js
 
 # crank it to make the queue visibly back up
