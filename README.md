@@ -115,6 +115,22 @@ Scale the workers to drain faster and watch the lag fall:
 docker compose up -d --scale fulfillment-worker=3
 ```
 
+## Live dashboard (Next.js + SSE)
+
+[`frontend/`](frontend) is a Next.js "live drop console" that streams the queue
+in real time over **Server-Sent Events** — no polling. The API exposes
+`GET /api/metrics/stream` ([`MetricsController`](order-api/src/main/java/com/hermes/orderapi/metrics/MetricsController.java)):
+a single background thread samples order counts + throughput every 500ms and
+fans the JSON snapshot out to every open connection. The page consumes it with
+the native `EventSource` API, so the charts move the instant k6 fires.
+
+```bash
+cd frontend
+npm install
+NEXT_PUBLIC_HERMES_API_BASE_URL=http://localhost:8080 npm run dev -- -p 3001
+# open http://localhost:3001  (unset the env var to run the self-contained DEMO simulator)
+```
+
 ## Using the real Olist dataset
 
 The synthetic catalogue makes the repo run instantly. To use the real
