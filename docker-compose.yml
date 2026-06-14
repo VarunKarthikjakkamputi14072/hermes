@@ -50,6 +50,24 @@ services:
       kafka:
         condition: service_healthy
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+  embedding-service:
+    build:
+      context: .
+      dockerfile: embedding-service/Dockerfile
+    # set MODEL_NAME (e.g. all-MiniLM-L6-v2) to use a real sentence-transformers
+    # model; left empty it serves a deterministic offline embedding
+    environment:
+      EMBED_DIM: 384
+    ports:
+      - "8000:8000"
+
   order-api:
     build:
       context: .
@@ -77,12 +95,21 @@ services:
       DB_PASSWORD: hermes
       KAFKA_BOOTSTRAP: kafka:29092
       HERMES_WORKER_CONCURRENCY: 3
+      # real ingestion path: embed via the Python service, write to shared Qdrant
+      HERMES_EMBEDDING_MODE: http
+      HERMES_EMBEDDING_HTTP_BASE_URL: http://embedding-service:8000
+      HERMES_VECTORSTORE_MODE: qdrant
+      HERMES_VECTORSTORE_QDRANT_URL: http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
         condition: service_healthy
       order-api:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+      qdrant:
         condition: service_started
     deploy:
       replicas: 1
@@ -111,3 +138,4 @@ services:
 
 volumes:
   pgdata:
+  qdrantdata:

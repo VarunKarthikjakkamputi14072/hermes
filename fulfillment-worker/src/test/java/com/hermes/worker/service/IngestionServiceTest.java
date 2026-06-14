@@ -4,6 +4,8 @@ import com.hermes.common.domain.IngestionJob;
 import com.hermes.common.domain.IngestionStatus;
 import com.hermes.common.event.IngestRequestedEvent;
 import com.hermes.common.repository.IngestionJobRepository;
+import com.hermes.worker.embedding.FakeEmbeddingModel;
+import com.hermes.worker.embedding.InMemoryVectorStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
@@ -20,7 +22,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @EntityScan("com.hermes.common.domain")
 @EnableJpaRepositories("com.hermes.common.repository")
-@Import({IngestionService.class, IngestionProgressService.class, FakeEmbedder.class})
+@Import({IngestionService.class, IngestionProgressService.class, ModelVectorStoreEmbedder.class,
+        FakeEmbeddingModel.class, InMemoryVectorStore.class})
 class IngestionServiceTest {
 
     @Autowired
