@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @EntityScan("com.hermes.common.domain")
 @EnableJpaRepositories("com.hermes.common.repository")
-@Import({IngestionService.class, FakeEmbedder.class})
+@Import({IngestionService.class, IngestionProgressService.class, FakeEmbedder.class})
 class IngestionServiceTest {
 
     @Autowired

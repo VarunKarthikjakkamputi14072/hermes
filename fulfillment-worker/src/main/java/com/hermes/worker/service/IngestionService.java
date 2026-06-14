@@ -1,68 +1,63 @@
 package com.hermes.worker.service;
 
-import com.hermes.common.domain.IngestionJob;
 import com.hermes.common.event.IngestRequestedEvent;
-import com.hermes.common.repository.IngestionJobRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The transactional heart of the ingestion path — the analogue of
- * {@code FulfillmentService}. Each call runs in a single DB transaction: the job
- * row is loaded, every chunk is embedded and written, and the job status is
- * advanced atomically. If any chunk fails, the whole unit of work rolls back and
- * Kafka redelivers the message; after the configured retries it lands on the
- * ingestion dead-letter topic.
+ * Orchestrates ingestion of one document. Deliberately <em>not</em> transactional:
+ * it claims the job, then embeds each chunk and flushes progress through
+ * {@link IngestionProgressService} in small committed steps, so the SSE stream
+ * sees the counter climb live and a crash can resume mid-document. The order
+ * path's single-transaction model isn't a fit here — a 5,000-page embed shouldn't
+ * be one all-or-nothing transaction.
  */
 @Service
 public class IngestionService {
 
     private static final Logger log = LoggerFactory.getLogger(IngestionService.class);
 
-    private final IngestionJobRepository jobRepository;
+    private final IngestionProgressService progress;
     private final Embedder embedder;
+    private final int flushEvery;
 
-    public IngestionService(IngestionJobRepository jobRepository, Embedder embedder) {
-        this.jobRepository = jobRepository;
+    public IngestionService(IngestionProgressService progress,
+                            Embedder embedder,
+                            @Value("${hermes.worker.progress-flush-every:1}") int flushEvery) {
+        this.progress = progress;
         this.embedder = embedder;
+        this.flushEvery = Math.max(1, flushEvery);
     }
 
-    @Transactional
     public IngestionResult ingest(IngestRequestedEvent event) {
-        IngestionJob job = jobRepository.findById(event.jobId()).orElse(null);
-        if (job == null) {
-            // The API publishes inside its own DB transaction, so a fast worker can
-            // consume the event before that commit is visible (a dual-write race).
-            // Retrying after a back-off lets the commit land; if it never appears,
-            // the message lands on the DLT.
-            throw new JobNotYetVisibleException(event.jobId());
+        IngestionProgressService.Claim claim = progress.claim(event.jobId(), event.chunkCount());
+        switch (claim.decision()) {
+            case NOT_VISIBLE -> throw new JobNotYetVisibleException(event.jobId());
+            case DUPLICATE -> {
+                return IngestionResult.SKIPPED_DUPLICATE;
+            }
+            case EMPTY -> {
+                return IngestionResult.REJECTED_EMPTY_DOCUMENT;
+            }
+            case PROCEED -> { /* fall through to the embed loop */ }
         }
 
-        // Idempotency: redelivery of an already-processed job is a no-op. This
-        // makes at-least-once delivery safe.
-        if (!job.isPending()) {
-            return IngestionResult.SKIPPED_DUPLICATE;
-        }
-
-        if (event.chunkCount() <= 0) {
-            job.markFailed("EMPTY_DOCUMENT");
-            jobRepository.save(job);
-            return IngestionResult.REJECTED_EMPTY_DOCUMENT;
-        }
-
-        job.markEmbedding();
-        for (int i = 0; i < event.chunkCount(); i++) {
+        int total = event.chunkCount();
+        for (int i = claim.startIndex(); i < total; i++) {
             // The embedder owns the call out to the model and the vector-store
-            // write. If it throws, the transaction rolls back and the message is
-            // redelivered — no half-ingested document is left visible.
+            // write. If it throws, the message is redelivered; progress committed
+            // so far lets the retry resume rather than re-embed from scratch.
             embedder.embed(event.docId(), i);
-            job.recordChunkEmbedded();
+            int done = i + 1;
+            if (done % flushEvery == 0) {
+                progress.advance(event.jobId(), done);
+            }
         }
-        job.markCompleted();
+        progress.complete(event.jobId(), total);
         if (log.isDebugEnabled()) {
-            log.debug("Ingested doc {} ({} chunks)", event.docId(), event.chunkCount());
+            log.debug("Ingested doc {} ({} chunks)", event.docId(), total);
         }
         return IngestionResult.COMPLETED;
     }

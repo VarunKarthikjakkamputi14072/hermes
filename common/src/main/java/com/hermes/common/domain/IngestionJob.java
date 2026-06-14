@@ -81,9 +81,9 @@ public class IngestionJob {
         this.failureReason = null;
     }
 
-    /** One chunk embedded and written; advances the progress counter. */
-    public void recordChunkEmbedded() {
-        this.processedChunks++;
+    /** Set the running progress counter as chunks are embedded and written. */
+    public void recordProgress(int processedChunks) {
+        this.processedChunks = processedChunks;
     }
 
     public void markCompleted() {
