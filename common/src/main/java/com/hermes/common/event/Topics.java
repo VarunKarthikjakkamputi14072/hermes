@@ -12,6 +12,15 @@ public final class Topics {
     /** Consumer group for the fulfilment workers. */
     public static final String FULFILMENT_GROUP = "fulfilment-workers";
 
+    /** Documents accepted by the API, awaiting asynchronous embedding. */
+    public static final String INGEST_REQUESTED = "ingest.requested";
+
+    /** Dead-letter topic for ingestion jobs that exhaust their retries. */
+    public static final String INGEST_REQUESTED_DLT = "ingest.requested.DLT";
+
+    /** Consumer group for the ingestion workers. */
+    public static final String INGEST_GROUP = "ingestion-workers";
+
     private Topics() {
     }
 }

@@ -29,4 +29,20 @@ public class TopicConfig {
                 .replicas(1)
                 .build();
     }
+
+    @Bean
+    public NewTopic ingestRequested() {
+        return TopicBuilder.name(Topics.INGEST_REQUESTED)
+                .partitions(6)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic ingestRequestedDlt() {
+        return TopicBuilder.name(Topics.INGEST_REQUESTED_DLT)
+                .partitions(6)
+                .replicas(1)
+                .build();
+    }
 }
