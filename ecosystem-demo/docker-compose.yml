@@ -54,8 +54,12 @@ services:
     build:
       context: ..
       dockerfile: embedding-service/Dockerfile
+    # real NVIDIA embeddings (nv-embedqa-e5-v5, 1024-dim) using the free-tier key
+    env_file:
+      - ../../Transit/.env
     environment:
-      EMBED_DIM: 384
+      EMBED_PROVIDER: nvidia
+      EMBED_DIM: 1024
 
   order-api:
     build:
@@ -83,6 +87,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       HERMES_EMBEDDING_MODE: http
       HERMES_EMBEDDING_HTTP_BASE_URL: http://embedding-service:8000
+      HERMES_EMBEDDING_HTTP_DIMENSION: 1024
       HERMES_VECTORSTORE_MODE: qdrant
       HERMES_VECTORSTORE_QDRANT_URL: http://qdrant:6333
     depends_on:
@@ -99,10 +104,14 @@ services:
   transit:
     build:
       context: ../../Transit
+    # real provider keys (free-tier NVIDIA NIM / Groq) come from Transit's .env;
+    # the gateway serves real Llama-3.3 answers — no fake provider.
+    env_file:
+      - ../../Transit/.env
     environment:
+      # these override .env so in-cluster URLs point at the right containers
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:////tmp/transit.db
-      USE_FAKE_PROVIDER: "true"
       MERIDIAN_URL: http://rag-monitor:8002
     ports:
       - "18080:8000"

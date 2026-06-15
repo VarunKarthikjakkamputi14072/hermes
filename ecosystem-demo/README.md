@@ -15,9 +15,9 @@ Qdrant <--embeds-- Hermes worker <--re-embed job-- order-api
 ```
 
 Observe on the read path (Transit → Meridian), act on the write path
-(Meridian → Hermes). Everything runs offline with no API keys — Transit serves a
-fake provider, Hermes embeds with a deterministic model, Meridian builds its
-drift reference from observed warm-up traffic.
+(Meridian → Hermes). Transit serves **real** answers via NVIDIA NIM (free-tier
+key from `Transit/.env`); Meridian builds its drift reference from observed
+warm-up traffic.
 
 ## Layout assumption
 

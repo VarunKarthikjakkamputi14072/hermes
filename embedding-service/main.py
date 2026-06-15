@@ -1,10 +1,14 @@
 """Embedding microservice — the Python side of Hermes' ingestion seam.
 
 Hermes (Java) owns the durable job lifecycle and asks this service only to turn
-chunk text into a vector. It runs offline by default with a deterministic hashing
-embedding (no model download, no torch), so the whole stack boots with zero
-external dependencies. Set MODEL_NAME to a sentence-transformers model to use a
-real model instead — the only change needed to go from demo to real embeddings.
+chunk text into a vector. Provider is chosen by EMBED_PROVIDER:
+
+* ``nvidia``   — real NVIDIA NIM embeddings (nv-embedqa-e5-v5, free-tier key).
+                 This is the default for the ecosystem demo: real vectors.
+* ``sentence`` — local sentence-transformers (set MODEL_NAME).
+* ``fake``     — deterministic offline vector (no key, no network) for CI/tests.
+
+EMBED_DIM must match the active model (nv-embedqa-e5-v5 = 1024, MiniLM = 384).
 """
 from __future__ import annotations
 
@@ -12,14 +16,20 @@ import hashlib
 import math
 import os
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-DIM = int(os.getenv("EMBED_DIM", "384"))
-MODEL_NAME = os.getenv("MODEL_NAME", "")  # empty => deterministic offline fake
+PROVIDER = os.getenv("EMBED_PROVIDER", "fake").lower()
+DIM = int(os.getenv("EMBED_DIM", "1024" if PROVIDER == "nvidia" else "384"))
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+NVIDIA_EMBED_MODEL = os.getenv("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embedqa-e5-v5")
+MODEL_NAME = os.getenv("MODEL_NAME", "")  # sentence-transformers model
 
 app = FastAPI(title="hermes-embedding-service")
-_model = None
+_st_model = None
 
 
 class EmbedRequest(BaseModel):
@@ -30,18 +40,37 @@ class EmbedResponse(BaseModel):
     vector: list[float]
 
 
-def _load_model():
-    """Lazily load a real sentence-transformers model when MODEL_NAME is set."""
-    global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer  # imported only if used
+def _nvidia_embed(text: str) -> list[float]:
+    if not NVIDIA_API_KEY:
+        raise HTTPException(503, "EMBED_PROVIDER=nvidia but NVIDIA_API_KEY is not set")
+    resp = httpx.post(
+        f"{NVIDIA_BASE_URL.rstrip('/')}/embeddings",
+        headers={"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": NVIDIA_EMBED_MODEL,
+            "input": [text],
+            "input_type": "passage",
+            "encoding_format": "float",
+            "truncate": "END",
+        },
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise HTTPException(502, f"NVIDIA embeddings error {resp.status_code}: {resp.text[:200]}")
+    return [float(x) for x in resp.json()["data"][0]["embedding"]]
 
-        _model = SentenceTransformer(MODEL_NAME)
-    return _model
+
+def _sentence_embed(text: str) -> list[float]:
+    global _st_model
+    if _st_model is None:
+        from sentence_transformers import SentenceTransformer
+
+        _st_model = SentenceTransformer(MODEL_NAME)
+    return _st_model.encode(text, normalize_embeddings=True).tolist()
 
 
 def _fake_embed(text: str) -> list[float]:
-    """Deterministic, L2-normalised pseudo-embedding seeded from the text."""
+    """Deterministic, L2-normalised pseudo-embedding — CI/tests only."""
     seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
     vec = []
     for _ in range(DIM):
@@ -53,13 +82,16 @@ def _fake_embed(text: str) -> list[float]:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "model": MODEL_NAME or "fake", "dim": DIM}
+    model = {"nvidia": NVIDIA_EMBED_MODEL, "sentence": MODEL_NAME}.get(PROVIDER, "fake")
+    return {"status": "ok", "provider": PROVIDER, "model": model, "dim": DIM}
 
 
 @app.post("/embed", response_model=EmbedResponse)
 def embed(req: EmbedRequest) -> EmbedResponse:
-    if MODEL_NAME:
-        vector = _load_model().encode(req.text, normalize_embeddings=True).tolist()
+    if PROVIDER == "nvidia":
+        vector = _nvidia_embed(req.text)
+    elif PROVIDER == "sentence":
+        vector = _sentence_embed(req.text)
     else:
         vector = _fake_embed(req.text)
     return EmbedResponse(vector=vector)
