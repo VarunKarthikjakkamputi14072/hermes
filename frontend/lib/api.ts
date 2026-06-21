@@ -32,6 +32,65 @@ export function metricsStreamUrl(sku?: string): string | null {
   return `${API_BASE_URL}/api/metrics/stream${q}`;
 }
 
+// ---- Ledger / payments -----------------------------------------------------
+
+// One frame off the ledger SSE stream (GET /api/payments/stream).
+export type LedgerMetrics = {
+  timestamp: number;
+  pending: number;
+  applied: number;
+  rejected: number;
+  total: number;
+  appliedPerSec: number;
+  duplicatesBlocked: number;
+  totalDebitedCents: number;
+  accountsOverdrawn: number;
+};
+
+export type Account = { id: string; holder: string; balanceCents: number };
+
+export function ledgerStreamUrl(): string | null {
+  if (!HAS_LIVE_BACKEND) return null;
+  return `${API_BASE_URL}/api/payments/stream`;
+}
+
+export async function fetchAccount(id: string): Promise<Account | null> {
+  if (!HAS_LIVE_BACKEND) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/accounts/${id}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return { id: String(d.id), holder: String(d.holder), balanceCents: Number(d.balanceCents) };
+  } catch {
+    return null;
+  }
+}
+
+// Fire one charge. Reusing an idempotencyKey is guaranteed not to charge twice.
+export async function charge(
+  accountId: string,
+  amountCents: number,
+  idempotencyKey: string,
+): Promise<{ ok: boolean; status: number; deduplicated: boolean }> {
+  if (!HAS_LIVE_BACKEND) return { ok: true, status: 202, deduplicated: false };
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/payments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId, amountCents, idempotencyKey }),
+    });
+    let deduplicated = false;
+    try {
+      deduplicated = (await res.json())?.deduplicated === true;
+    } catch {
+      /* ignore body parse */
+    }
+    return { ok: res.ok, status: res.status, deduplicated };
+  } catch {
+    return { ok: false, status: 0, deduplicated: false };
+  }
+}
+
 export type Product = {
   sku: string;
   name: string;

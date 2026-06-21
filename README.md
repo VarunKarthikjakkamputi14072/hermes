@@ -1,11 +1,23 @@
-# Hermes — Distributed Order Fulfillment Engine
+# Hermes — Reliable Transaction Processing Engine
 
+Enterprise backends are judged on one thing above all: **processing money and
+inventory reliably under load — exactly once, never double, never oversold.**
+Hermes is a Spring Boot + Kafka engine that does exactly that, shown across three
+contended-resource domains that share one spine:
 
-A microservices order processor built for the thing enterprise backends actually
-get judged on: **reliable, high-throughput transaction processing.** An API accepts
-orders and never blocks on inventory; a pool of workers reserves stock inside
-real database transactions; and a Grafana dashboard lets you *watch* the Kafka
-queue back up and drain as you blast it with load.
+- 💳 **Payments ledger** *(headline)* — charge accounts **exactly once**, never
+  double-charge, never overdraw, even when a flaky client fires the same charge
+  100× at once.
+- 🎟️ **Flash-sale / drops** — absorb a buy stampede without overselling or
+  crashing the storefront.
+- 📄 **Ingestion** — accept documents and embed them asynchronously into a vector
+  store.
+
+The spine: **accept a burst without blocking (`202` + Kafka) → settle against a
+scarce resource inside a row-locked, idempotent DB transaction → isolate poison
+messages on a dead-letter topic → watch the backlog drain on Grafana.** Below,
+the order/inventory path illustrates the spine; the payments ledger applies the
+same mechanism to money.
 
 ```
             POST /api/orders                Kafka topic                 @Transactional
@@ -16,6 +28,38 @@ queue back up and drain as you blast it with load.
                                                                          └── retries ▶ orders.placed.DLT
         Prometheus  ◀── /actuator/prometheus + kafka-exporter ──▶  Grafana dashboard
 ```
+
+## Payments ledger — charge exactly once (the headline)
+
+The hardest, most valuable version of this engine is money: a charge must apply
+**exactly once**, and an account must **never go negative**, no matter how many
+times a client retries.
+
+- `POST /api/payments` carries a client-supplied **`Idempotency-Key`** (the Stripe
+  pattern). A `UNIQUE` constraint on that column is the dedupe guarantee: if the
+  same key races in 100× concurrently, exactly one row is created and the other 99
+  return the existing payment — no second charge.
+- The worker debits the account inside a row-locked `@Transactional` settlement
+  ([`LedgerService`](fulfillment-worker/src/main/java/com/hermes/worker/service/LedgerService.java)),
+  so concurrent charges on one account can never overdraw it.
+- Consumers are idempotent, so at-least-once Kafka redelivery never double-debits.
+
+**The double-charge stress test** — fire the same key 200× at once:
+
+```bash
+ACC=ACC-0001
+for i in $(seq 1 200); do
+  curl -s -o /dev/null -X POST localhost:8080/api/payments -H 'Content-Type: application/json' \
+    -d '{"accountId":"ACC-0001","amountCents":1000,"idempotencyKey":"DUP-DEMO-1"}' &
+done; wait
+curl -s localhost:8080/api/payments/stats
+# → {"PENDING":0,"APPLIED":1,"REJECTED":0,"DUPLICATES_BLOCKED":199}   ← charged ONCE
+```
+
+Then load it: `k6 run loadtest/k6-payments.js` (≈10% of charges replay an old key).
+Verified: thousands of charges settle, the queue drains to 0, the
+`accounts overdrawn` invariant stays **0**, and "double-charges prevented" climbs.
+The live **ledger console** at `/payments` streams it all over SSE.
 
 ## Why it's built this way
 

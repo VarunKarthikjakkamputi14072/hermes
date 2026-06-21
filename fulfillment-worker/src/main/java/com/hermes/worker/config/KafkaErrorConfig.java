@@ -14,8 +14,8 @@ import org.springframework.util.backoff.FixedBackOff;
  * with a fixed back-off, then parked on a dead-letter topic instead of blocking
  * the partition forever — the classic poison-message pattern, ported from the
  * Argus DLQ idea into Spring Kafka. The recoverer routes each failure to the DLT
- * that matches its source topic, so orders and ingestion jobs are dead-lettered
- * independently.
+ * that matches its source topic, so orders, payments, and ingestion jobs are
+ * dead-lettered independently.
  */
 @Configuration
 public class KafkaErrorConfig {
@@ -25,9 +25,11 @@ public class KafkaErrorConfig {
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 template,
                 (record, ex) -> {
-                    String dlt = Topics.INGEST_REQUESTED.equals(record.topic())
-                            ? Topics.INGEST_REQUESTED_DLT
-                            : Topics.ORDERS_PLACED_DLT;
+                    String dlt = switch (record.topic()) {
+                        case Topics.INGEST_REQUESTED -> Topics.INGEST_REQUESTED_DLT;
+                        case Topics.PAYMENTS_REQUESTED -> Topics.PAYMENTS_REQUESTED_DLT;
+                        default -> Topics.ORDERS_PLACED_DLT;
+                    };
                     return new TopicPartition(dlt, record.partition());
                 }
         );

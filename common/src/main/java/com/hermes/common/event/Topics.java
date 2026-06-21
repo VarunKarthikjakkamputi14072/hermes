@@ -21,6 +21,15 @@ public final class Topics {
     /** Consumer group for the ingestion workers. */
     public static final String INGEST_GROUP = "ingestion-workers";
 
+    /** Payments accepted by the API, awaiting settlement against the ledger. */
+    public static final String PAYMENTS_REQUESTED = "payments.requested";
+
+    /** Dead-letter topic for payments that exhaust their retries. */
+    public static final String PAYMENTS_REQUESTED_DLT = "payments.requested.DLT";
+
+    /** Consumer group for the ledger workers. */
+    public static final String PAYMENT_GROUP = "ledger-workers";
+
     private Topics() {
     }
 }

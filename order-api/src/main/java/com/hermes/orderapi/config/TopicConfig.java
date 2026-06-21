@@ -45,4 +45,20 @@ public class TopicConfig {
                 .replicas(1)
                 .build();
     }
+
+    @Bean
+    public NewTopic paymentsRequested() {
+        return TopicBuilder.name(Topics.PAYMENTS_REQUESTED)
+                .partitions(6)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic paymentsRequestedDlt() {
+        return TopicBuilder.name(Topics.PAYMENTS_REQUESTED_DLT)
+                .partitions(6)
+                .replicas(1)
+                .build();
+    }
 }
