@@ -13,9 +13,11 @@ import {
 import {
   Activity,
   CheckCircle2,
+  Cpu,
   CreditCard,
   Layers,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   XCircle,
   Zap,
@@ -23,8 +25,10 @@ import {
 import {
   charge,
   fetchAccount,
+  fetchFraudFlags,
   HAS_LIVE_BACKEND,
   ledgerStreamUrl,
+  type FraudFlag,
   type LedgerMetrics,
 } from "@/lib/api";
 
@@ -54,8 +58,16 @@ export default function PaymentsPage() {
   const [m, setM] = useState<LedgerMetrics>(EMPTY);
   const [balance, setBalance] = useState<number | null>(null);
   const [history, setHistory] = useState<Point[]>([]);
+  const [flags, setFlags] = useState<FraudFlag[]>([]);
   const [busy, setBusy] = useState(false);
   const demo = useRef({ applied: 0, rejected: 0, dupes: 0, debited: 0, balance: 97_200 });
+  const lastFlagFetch = useRef(0);
+
+  const refreshFlags = useCallback(async () => {
+    if (!live) return;
+    const f = await fetchFraudFlags(12);
+    if (f) setFlags(f);
+  }, [live]);
 
   const refreshBalance = useCallback(async () => {
     if (!live) {
@@ -76,14 +88,21 @@ export default function PaymentsPage() {
       const next: LedgerMetrics = JSON.parse((ev as MessageEvent).data);
       setM(next);
       setHistory((h) => [...h, { t: next.timestamp, pending: next.pending }].slice(-40));
+      // Piggyback on the SSE tick as a clock — refresh fraud flags ~every 2s
+      // (so AI narratives appear as they're written) without a separate timer.
+      if (next.timestamp - lastFlagFetch.current > 2000) {
+        lastFlagFetch.current = next.timestamp;
+        refreshFlags();
+      }
     });
     es.onerror = () => {}; // EventSource auto-reconnects
     return () => es.close();
-  }, [live]);
+  }, [live, refreshFlags]);
 
   useEffect(() => {
     refreshBalance();
-  }, [refreshBalance]);
+    refreshFlags();
+  }, [refreshBalance, refreshFlags]);
 
   // ---- DEMO: light client-side model so the page is alive without a backend
   const demoTick = useCallback(() => {
@@ -152,6 +171,33 @@ export default function PaymentsPage() {
     setTimeout(() => setBusy(false), 900);
   }, [live, refreshBalance, demoTick]);
 
+  // Hammer one account with oversized charges → a run of insufficient-funds
+  // rejections → the deterministic rules flag it, then NIM narrates.
+  const cardTesting = useCallback(async () => {
+    setBusy(true);
+    if (live) {
+      await Promise.all(Array.from({ length: 12 }, () => charge(ACCOUNT, 500_000, `attack-${rid()}`)));
+      setTimeout(refreshFlags, 2500);
+    } else {
+      const now = Date.now();
+      const fakes: FraudFlag[] = Array.from({ length: 3 }, (_, i) => ({
+        id: rid(),
+        accountId: ACCOUNT,
+        amountCents: 500_000,
+        riskScore: 100,
+        decision: "HOLD",
+        reasons: "12 charges in 10s (velocity); 12 insufficient-funds attempts in 60s (card-testing pattern); large charge of $5,000.00",
+        narrative:
+          "Rapid repeated insufficient-funds attempts on a single account are a classic card-testing signature. Recommended action: hold the charge and require step-up verification.",
+        narrativePending: false,
+        createdAt: new Date(now - i * 500).toISOString(),
+      }));
+      setFlags((prev) => [...fakes, ...prev].slice(0, 12));
+    }
+    await refreshBalance();
+    setTimeout(() => setBusy(false), 900);
+  }, [live, refreshFlags, refreshBalance]);
+
   return (
     <div className="grid-bg min-h-screen">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
@@ -215,6 +261,10 @@ export default function PaymentsPage() {
                   <Activity className="h-4 w-4" />
                   Black Friday · 200 charges
                 </button>
+                <button onClick={cardTesting} disabled={busy} className="btn-ghost border-red-500/40 text-red-300 hover:border-red-400 hover:text-red-200">
+                  <ShieldAlert className="h-4 w-4" />
+                  Card-testing attack
+                </button>
               </div>
               <p className="text-xs text-slate-500">
                 <strong className="text-slate-300">Double-tap</strong> fires 100 charges with one
@@ -274,6 +324,34 @@ export default function PaymentsPage() {
           </section>
         </div>
 
+        {/* Fraud watch */}
+        <section className="panel mt-6">
+          <div className="panel-header">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-4 w-4 text-amber-400" />
+              <h2 className="text-sm font-semibold text-slate-100">Fraud watch · AI risk analyst</h2>
+            </div>
+            <span className="badge bg-slate-700/40 text-slate-300">
+              <Cpu className="h-3 w-3" /> NVIDIA NIM
+            </span>
+          </div>
+          <div className="p-4">
+            {flags.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-500">
+                No risk flags. Deterministic rules score every charge (velocity, card-testing,
+                amount) and decide HOLD/REVIEW — then NIM writes the analyst note. Run a{" "}
+                <span className="text-red-300">card-testing attack</span> to see it.
+              </p>
+            ) : (
+              <ul className="space-y-3">
+                {flags.map((f) => (
+                  <FlagRow key={f.id} f={f} />
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
+
         <footer className="mt-8 text-center text-xs text-slate-600">
           {live ? (
             <>Streaming the ledger over Server-Sent Events from order-api · 500ms push.</>
@@ -283,6 +361,34 @@ export default function PaymentsPage() {
         </footer>
       </div>
     </div>
+  );
+}
+
+function FlagRow({ f }: { f: FraudFlag }) {
+  const tone =
+    f.decision === "HOLD"
+      ? "bg-red-500/15 text-red-300"
+      : f.decision === "REVIEW"
+        ? "bg-amber-500/15 text-amber-300"
+        : "bg-slate-600/30 text-slate-300";
+  return (
+    <li className="animate-fade-in rounded-lg border border-terminal-border bg-terminal-bg/60 p-4">
+      <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+        <span className={`badge ${tone}`}>{f.decision}</span>
+        <span className="mono text-slate-300">{f.accountId}</span>
+        <span className="text-slate-500">{usd(f.amountCents)}</span>
+        <span className="text-slate-600">·</span>
+        <span className="text-slate-500">score {f.riskScore}/100</span>
+      </div>
+      <p className="mb-2 text-xs text-slate-500">{f.reasons}</p>
+      <p className="text-sm leading-relaxed text-slate-300">
+        {f.narrativePending || !f.narrative ? (
+          <span className="text-slate-500">AI analyst is writing…</span>
+        ) : (
+          f.narrative
+        )}
+      </p>
+    </li>
   );
 }
 

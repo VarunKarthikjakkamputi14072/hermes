@@ -2,6 +2,7 @@ package com.hermes.worker.kafka;
 
 import com.hermes.common.event.PaymentRequestedEvent;
 import com.hermes.common.event.Topics;
+import com.hermes.worker.fraud.FraudEvaluator;
 import com.hermes.worker.service.LedgerResult;
 import com.hermes.worker.service.LedgerService;
 import io.micrometer.core.instrument.Counter;
@@ -20,11 +21,15 @@ public class PaymentConsumer {
     private static final Logger log = LoggerFactory.getLogger(PaymentConsumer.class);
 
     private final LedgerService ledgerService;
+    private final FraudEvaluator fraudEvaluator;
     private final MeterRegistry meterRegistry;
     private final Map<LedgerResult, Counter> counters = new ConcurrentHashMap<>();
 
-    public PaymentConsumer(LedgerService ledgerService, MeterRegistry meterRegistry) {
+    public PaymentConsumer(LedgerService ledgerService,
+                           FraudEvaluator fraudEvaluator,
+                           MeterRegistry meterRegistry) {
         this.ledgerService = ledgerService;
+        this.fraudEvaluator = fraudEvaluator;
         this.meterRegistry = meterRegistry;
     }
 
@@ -36,6 +41,12 @@ public class PaymentConsumer {
     public void onPaymentRequested(PaymentRequestedEvent event) {
         LedgerResult result = ledgerService.apply(event);
         record(result);
+        // Score real settlements for risk (skip idempotent redeliveries). This runs
+        // after the settle transaction commits, and the LLM narrative is generated
+        // later off-thread, so neither touches the throughput path.
+        if (result == LedgerResult.APPLIED || result == LedgerResult.REJECTED_INSUFFICIENT_FUNDS) {
+            fraudEvaluator.evaluate(event.paymentId(), event.accountId(), event.amountCents());
+        }
         if (log.isDebugEnabled()) {
             log.debug("Payment {} -> {}", event.paymentId(), result);
         }

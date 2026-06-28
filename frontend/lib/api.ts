@@ -66,6 +66,32 @@ export async function fetchAccount(id: string): Promise<Account | null> {
   }
 }
 
+// A risk flag raised by the deterministic rules; narrative is the AI analyst note
+// (NVIDIA NIM), null/pending until generated off-thread.
+export type FraudFlag = {
+  id: string;
+  accountId: string;
+  amountCents: number;
+  riskScore: number;
+  decision: "ALLOW" | "REVIEW" | "HOLD";
+  reasons: string;
+  narrative: string | null;
+  narrativePending: boolean;
+  createdAt: string;
+};
+
+export async function fetchFraudFlags(limit = 12): Promise<FraudFlag[] | null> {
+  if (!HAS_LIVE_BACKEND) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/fraud/flags?limit=${limit}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return Array.isArray(d) ? (d as FraudFlag[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 // Fire one charge. Reusing an idempotencyKey is guaranteed not to charge twice.
 export async function charge(
   accountId: string,

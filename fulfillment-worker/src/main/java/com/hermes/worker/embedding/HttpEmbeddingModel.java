@@ -3,6 +3,7 @@ package com.hermes.worker.embedding;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -27,8 +28,15 @@ public class HttpEmbeddingModel implements EmbeddingModel {
             @Value("${hermes.embedding.http.base-url:http://embedding-service:8000}") String baseUrl,
             @Value("${hermes.embedding.http.dimension:384}") int dimension) {
         // use the Boot-autoconfigured builder so the Jackson message converter is
-        // wired in — a bare RestClient.builder() ships an empty body for POJO/Map
-        this.client = restClientBuilder.baseUrl(baseUrl).build();
+        // wired in — a bare RestClient.builder() ships an empty body for POJO/Map.
+        // Timeouts so a hung/dead provider fails fast: the message is then
+        // redelivered and resumes from committed progress rather than blocking the
+        // worker. Read timeout exceeds the embedding-service's worst-case 429
+        // backoff chain (~31s) so legitimate rate-limit waits aren't cut short.
+        SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
+        rf.setConnectTimeout(5_000);
+        rf.setReadTimeout(90_000);
+        this.client = restClientBuilder.requestFactory(rf).baseUrl(baseUrl).build();
         this.dimension = dimension;
     }
 

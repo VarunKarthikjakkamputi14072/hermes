@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import time
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -43,21 +44,28 @@ class EmbedResponse(BaseModel):
 def _nvidia_embed(text: str) -> list[float]:
     if not NVIDIA_API_KEY:
         raise HTTPException(503, "EMBED_PROVIDER=nvidia but NVIDIA_API_KEY is not set")
-    resp = httpx.post(
-        f"{NVIDIA_BASE_URL.rstrip('/')}/embeddings",
-        headers={"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": NVIDIA_EMBED_MODEL,
-            "input": [text],
-            "input_type": "passage",
-            "encoding_format": "float",
-            "truncate": "END",
-        },
-        timeout=30,
-    )
-    if resp.status_code >= 400:
-        raise HTTPException(502, f"NVIDIA embeddings error {resp.status_code}: {resp.text[:200]}")
-    return [float(x) for x in resp.json()["data"][0]["embedding"]]
+    body = {
+        "model": NVIDIA_EMBED_MODEL,
+        "input": [text],
+        "input_type": "passage",
+        "encoding_format": "float",
+        "truncate": "END",
+    }
+    headers = {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"}
+    last = None
+    # Retry 429 / 5xx with exponential backoff so the free-tier per-minute rate
+    # limit just slows the rebuild instead of failing it.
+    for attempt in range(5):
+        last = httpx.post(
+            f"{NVIDIA_BASE_URL.rstrip('/')}/embeddings", headers=headers, json=body, timeout=30
+        )
+        if last.status_code < 400:
+            return [float(x) for x in last.json()["data"][0]["embedding"]]
+        if last.status_code in (429, 500, 502, 503, 504):
+            time.sleep(min(2 ** attempt, 20))  # 1, 2, 4, 8, 16s — rides out the rate window
+            continue
+        break  # non-retryable error
+    raise HTTPException(502, f"NVIDIA embeddings error {last.status_code}: {last.text[:200]}")
 
 
 def _sentence_embed(text: str) -> list[float]:

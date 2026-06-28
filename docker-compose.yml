@@ -100,6 +100,9 @@ services:
       HERMES_EMBEDDING_HTTP_BASE_URL: http://embedding-service:8000
       HERMES_VECTORSTORE_MODE: qdrant
       HERMES_VECTORSTORE_QDRANT_URL: http://qdrant:6333
+      # AI fraud narrator: set NVIDIA_API_KEY in your shell to use real NIM;
+      # left empty, the narrator falls back to a deterministic template.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

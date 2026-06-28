@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,4 +18,10 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
 
     @Query("select coalesce(sum(p.amountCents), 0) from Payment p where p.status = :status")
     long sumAmountByStatus(@Param("status") PaymentStatus status);
+
+    /** Velocity signal: how many charges this account made recently. */
+    long countByAccountIdAndCreatedAtAfter(String accountId, Instant after);
+
+    /** Card-testing signal: a run of insufficient-funds rejections on one account. */
+    long countByAccountIdAndStatusAndCreatedAtAfter(String accountId, PaymentStatus status, Instant after);
 }
