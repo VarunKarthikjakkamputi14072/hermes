@@ -36,7 +36,8 @@ public class PaymentConsumer {
     @KafkaListener(
             topics = Topics.PAYMENTS_REQUESTED,
             groupId = Topics.PAYMENT_GROUP,
-            concurrency = "${hermes.worker.concurrency:3}"
+            concurrency = "${hermes.worker.concurrency:3}",
+            containerFactory = "paymentsKafkaListenerContainerFactory"
     )
     public void onPaymentRequested(PaymentRequestedEvent event) {
         LedgerResult result = ledgerService.apply(event);

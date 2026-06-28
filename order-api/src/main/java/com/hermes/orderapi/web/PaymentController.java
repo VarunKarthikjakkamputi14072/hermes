@@ -2,10 +2,9 @@ package com.hermes.orderapi.web;
 
 import com.hermes.common.domain.Payment;
 import com.hermes.common.domain.PaymentStatus;
-import com.hermes.common.event.PaymentRequestedEvent;
 import com.hermes.common.repository.PaymentRepository;
-import com.hermes.orderapi.kafka.PaymentProducer;
 import com.hermes.orderapi.metrics.PaymentMetrics;
+import com.hermes.orderapi.payment.PaymentService;
 import com.hermes.orderapi.web.dto.CreatePaymentRequest;
 import com.hermes.orderapi.web.dto.PaymentResponse;
 import jakarta.validation.Valid;
@@ -20,7 +19,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -30,28 +28,28 @@ import java.util.UUID;
 public class PaymentController {
 
     private final PaymentRepository paymentRepository;
-    private final PaymentProducer paymentProducer;
+    private final PaymentService paymentService;
     private final PaymentMetrics paymentMetrics;
 
     public PaymentController(PaymentRepository paymentRepository,
-                            PaymentProducer paymentProducer,
+                            PaymentService paymentService,
                             PaymentMetrics paymentMetrics) {
         this.paymentRepository = paymentRepository;
-        this.paymentProducer = paymentProducer;
+        this.paymentService = paymentService;
         this.paymentMetrics = paymentMetrics;
     }
 
     /**
-     * Accepts a charge and hands it to Kafka for settlement, returning 202.
+     * Accepts a charge and returns 202. The payment row and its Kafka event are
+     * written atomically to the outbox by {@link PaymentService}; Debezium ships
+     * the event — no direct Kafka call, so the API can't commit the charge and
+     * then lose the event.
      *
-     * Idempotency: the request carries a client-supplied key. If a payment with
-     * that key already exists we return it unchanged — no second charge, no
-     * second event. The UNIQUE constraint on the column closes the concurrency
-     * window: if two requests with the same key race past the initial lookup,
-     * exactly one INSERT wins and the other catches the violation and returns
-     * the winner. This is *not* a method-level @Transactional on purpose, so the
-     * failed insert's own transaction rolls back cleanly and the follow-up read
-     * runs in a fresh one.
+     * Idempotency: the request carries a client-supplied key. If one already
+     * exists we return it unchanged. The UNIQUE constraint closes the concurrency
+     * window — if two requests with the same key race past the lookup, exactly
+     * one INSERT wins and the other catches the violation (which rolls back its
+     * whole transaction, payment + outbox) and returns the winner.
      */
     @PostMapping
     public ResponseEntity<PaymentResponse> charge(@Valid @RequestBody CreatePaymentRequest request) {
@@ -61,30 +59,16 @@ public class PaymentController {
             return ResponseEntity.ok(PaymentResponse.deduplicated(existing));
         }
 
-        Payment payment = new Payment(
-                UUID.randomUUID(),
-                request.idempotencyKey(),
-                request.accountId(),
-                request.amountCents()
-        );
         try {
-            paymentRepository.saveAndFlush(payment); // flush now so the unique constraint fires here
+            Payment payment = paymentService.acceptCharge(request);
+            return ResponseEntity.accepted().body(PaymentResponse.accepted(payment));
         } catch (DataIntegrityViolationException race) {
-            // A concurrent request with the same key inserted first — dedupe to it.
+            // A concurrent request with the same key committed first — dedupe to it.
             paymentMetrics.recordDuplicate();
             Payment winner = paymentRepository.findByIdempotencyKey(request.idempotencyKey())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "duplicate key"));
             return ResponseEntity.ok(PaymentResponse.deduplicated(winner));
         }
-
-        paymentProducer.publish(new PaymentRequestedEvent(
-                payment.getId(),
-                payment.getIdempotencyKey(),
-                payment.getAccountId(),
-                payment.getAmountCents(),
-                Instant.now()
-        ));
-        return ResponseEntity.accepted().body(PaymentResponse.accepted(payment));
     }
 
     @GetMapping("/{id}")

@@ -61,6 +61,34 @@ Verified: thousands of charges settle, the queue drains to 0, the
 `accounts overdrawn` invariant stays **0**, and "double-charges prevented" climbs.
 The live **ledger console** at `/payments` streams it all over SSE.
 
+### Transactional outbox + Debezium CDC (no lost events)
+
+A naive design saves the payment to Postgres and *then* publishes to Kafka — two
+writes that can diverge if the process dies in between (the **dual-write problem**).
+The payment path avoids it entirely:
+
+```
+POST /api/payments ─▶ order-api ──┐ one DB transaction
+                                  ├─▶  payments  (the charge)
+                                  └─▶  outbox_events  (the Kafka event as JSON)
+                                          │ committed atomically
+                          Debezium ◀──────┘ tails the Postgres WAL (logical replication)
+                              └─▶ Kafka topic `payments.requested` ─▶ ledger worker settles
+```
+
+[`PaymentService`](order-api/src/main/java/com/hermes/orderapi/payment/PaymentService.java)
+writes the `Payment` **and** an `outbox_events` row in **one transaction** — there is
+no Kafka call in the API at all. **Debezium** (Kafka Connect, `EventRouter` SMT) tails
+the WAL and ships each committed outbox row to Kafka. The event therefore exists in
+Kafka *if and only if* the charge committed — exactly-once, no lost events, and the old
+consume-before-commit race becomes impossible.
+
+Proven: stop the worker, fire 15 charges, restart → **all 15 settle, nothing lost**;
+fire the same idempotency key 50× → exactly **one** outbox row. It's all wired into
+`docker compose up` (Postgres runs with `wal_level=logical`; a `connect-init` container
+registers [the connector](infra/debezium/payments-outbox-connector.json) automatically).
+*(The order path keeps the simpler direct-publish for contrast.)*
+
 ## Why it's built this way
 
 - **The API returns `202 Accepted`, not `200`.** It persists the order as `PENDING`
@@ -197,9 +225,8 @@ CI runs `mvn verify` on every push ([ci.yml](.github/workflows/ci.yml)).
 
 ## What I'd do next
 
-- **Transactional outbox** on the API side: today it saves then publishes in one
-  `@Transactional` method, but a crash between commit and publish could lose an
-  event. An outbox table + relay (or Debezium CDC) makes publish exactly-once.
+- **Transactional outbox + Debezium CDC** — ✅ done on the payments path (see above).
+  Next: extend it to the order path too, and add a relay-lag metric to the dashboard.
 - **Saga / compensation**: reservation → payment → shipping as separate steps,
   with compensating actions if a later step fails.
 - **Per-service databases**: split orders and inventory into their own schemas to

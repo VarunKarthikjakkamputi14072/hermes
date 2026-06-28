@@ -2,15 +2,15 @@ package com.hermes.orderapi.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hermes.common.domain.Payment;
-import com.hermes.common.event.PaymentRequestedEvent;
 import com.hermes.common.repository.PaymentRepository;
-import com.hermes.orderapi.kafka.PaymentProducer;
 import com.hermes.orderapi.metrics.PaymentMetrics;
+import com.hermes.orderapi.payment.PaymentService;
 import com.hermes.orderapi.web.dto.CreatePaymentRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -36,14 +36,15 @@ class PaymentControllerTest {
     @MockBean
     PaymentRepository paymentRepository;
     @MockBean
-    PaymentProducer paymentProducer;
+    PaymentService paymentService;
     @MockBean
     PaymentMetrics paymentMetrics;
 
     @Test
-    void acceptsNewChargeAndPublishesEvent() throws Exception {
+    void acceptsNewChargeViaOutbox() throws Exception {
         when(paymentRepository.findByIdempotencyKey("key-1")).thenReturn(Optional.empty());
-        when(paymentRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentService.acceptCharge(any()))
+                .thenReturn(new Payment(UUID.randomUUID(), "key-1", "ACC-1", 2_500));
 
         CreatePaymentRequest body = new CreatePaymentRequest("ACC-1", 2_500, "key-1");
 
@@ -55,7 +56,7 @@ class PaymentControllerTest {
                 .andExpect(jsonPath("$.deduplicated").value(false))
                 .andExpect(jsonPath("$.amountCents").value(2500));
 
-        verify(paymentProducer).publish(any(PaymentRequestedEvent.class));
+        verify(paymentService).acceptCharge(any());
     }
 
     @Test
@@ -74,7 +75,28 @@ class PaymentControllerTest {
                 .andExpect(jsonPath("$.status").value("APPLIED"));
 
         verify(paymentMetrics).recordDuplicate();
-        verify(paymentProducer, never()).publish(any());
+        verify(paymentService, never()).acceptCharge(any());
+    }
+
+    @Test
+    void dedupesWhenConcurrentInsertWinsTheRace() throws Exception {
+        Payment winner = new Payment(UUID.randomUUID(), "key-1", "ACC-1", 2_500);
+        // first lookup misses, the atomic insert loses the race, the retry lookup finds the winner
+        when(paymentRepository.findByIdempotencyKey("key-1"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(winner));
+        when(paymentService.acceptCharge(any()))
+                .thenThrow(new DataIntegrityViolationException("duplicate idempotency key"));
+
+        CreatePaymentRequest body = new CreatePaymentRequest("ACC-1", 2_500, "key-1");
+
+        mockMvc.perform(post("/api/payments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.deduplicated").value(true));
+
+        verify(paymentMetrics).recordDuplicate();
     }
 
     @Test
