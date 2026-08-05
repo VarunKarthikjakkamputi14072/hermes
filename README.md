@@ -1,33 +1,134 @@
 # Hermes — Reliable Transaction Processing Engine
 
-Enterprise backends are judged on one thing above all: **processing money and
-inventory reliably under load — exactly once, never double, never oversold.**
-Hermes is a Spring Boot + Kafka engine that does exactly that, shown across three
-contended-resource domains that share one spine:
+**Charge money and sell inventory exactly once under a traffic spike — never
+double-charging, never overselling, never dropping an order.**
 
-- 💳 **Payments ledger** *(headline)* — charge accounts **exactly once**, never
-  double-charge, never overdraw, even when a flaky client fires the same charge
-  100× at once.
-- 🎟️ **Flash-sale / drops** — absorb a buy stampede without overselling or
-  crashing the storefront.
-- 📄 **Ingestion** — accept documents and embed them asynchronously into a vector
-  store.
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client(["client"]) -- "POST /api/orders" --> api["order-api<br/>(returns 202)"]
+    api -- "persist PENDING" --> pg[("PostgreSQL<br/>orders + inventory")]
+    api -- "publish, keyed by SKU" --> topic{{"Kafka<br/>orders.placed"}}
+    topic --> worker["fulfillment-worker<br/>(consumer group)"]
+    worker -- "row-locked deduct<br/>@Transactional" --> pg
+    worker -- "retries exhausted" --> dlt{{"orders.placed.DLT"}}
+
+    api & worker -- "/actuator/prometheus" --> prom["Prometheus"]
+    kx["kafka-exporter<br/>(consumer lag)"] --> prom
+    prom --> graf["Grafana dashboard"]
+
+    classDef store fill:#fff3cd,stroke:#d39e00,color:#333;
+    classDef bus fill:#e2d9f3,stroke:#6f42c1,color:#333;
+    classDef svc fill:#d4edda,stroke:#28a745,color:#333;
+    class pg store;
+    class topic,dlt bus;
+    class api,worker,prom,graf,kx svc;
+```
 
 The spine: **accept a burst without blocking (`202` + Kafka) → settle against a
 scarce resource inside a row-locked, idempotent DB transaction → isolate poison
-messages on a dead-letter topic → watch the backlog drain on Grafana.** Below,
-the order/inventory path illustrates the spine; the payments ledger applies the
-same mechanism to money.
+messages on a dead-letter topic → watch the backlog drain on Grafana.** The same
+mechanism runs three domains: a **payments ledger** (the headline), **flash-sale
+inventory**, and **async document ingestion**.
+
+---
+
+## The key design decision: `202 Accepted`, not `200 OK`
+
+**The alternative I rejected:** process the order synchronously — deduct
+inventory inside the HTTP request and return `200 OK` with the final outcome.
+It's simpler, and the client learns immediately whether the order succeeded.
+
+**Why it loses:** a synchronous handler holds a DB row lock for the duration of
+the request, so the API's throughput is capped by how fast the *slowest*
+contended row can be updated. Every buyer of a hot SKU serialises on one lock
+while holding an HTTP connection open. Under a spike the thread pool fills with
+threads waiting on locks, latency climbs for *all* endpoints, and the storefront
+falls over — the failure mode is total, not graceful.
+
+**What Hermes does instead:** the API persists the order as `PENDING`, publishes
+to Kafka, and returns `202` in ~1.6 ms median without ever touching inventory.
+Lock contention moves off the request path and into a worker pool that drains at
+its own pace. A spike becomes *queue depth* — a number on a dashboard that
+recovers — instead of downtime. Consumer lag is the visible pressure gauge, and
+scaling workers is the visible relief valve.
+
+**What it costs, honestly:** the client no longer learns the outcome
+synchronously. It gets an order id and must poll or subscribe. That's a real
+API-ergonomics tax, paid deliberately to buy availability under load — and it's
+why the order-status endpoint and the SSE stream exist.
+
+---
+
+## Measured result
+
+Measured **2026-08-05** on an Apple M2 (8 core / 16 GB) with Docker allocated
+**4 CPU / 8 GB**, against the 200-SKU seeded catalogue.
+
+**Throughput — `k6 run -e RATE=300 -e DURATION=60s loadtest/k6-blast.js`:**
+
+| Metric | Result |
+|---|---|
+| Orders accepted | **17,955** in 60 s (**299.2/s** sustained) |
+| Failed requests | **0** (0.00%) |
+| Latency — median | **1.57 ms** |
+| Latency — p90 / p95 | 7.99 ms / **24.17 ms** |
+
+**Correctness under that load** — every order is accounted for, nothing oversold:
 
 ```
-            POST /api/orders                Kafka topic                 @Transactional
- client ─────────────────────▶  order-api ───────────────▶  fulfillment-worker ──▶  PostgreSQL
-                                  (202)      orders.placed     (consumer group,         (orders +
-                                   │                            row-locked deduct)       inventory)
-                                   └── persists PENDING                  │
-                                                                         └── retries ▶ orders.placed.DLT
-        Prometheus  ◀── /actuator/prometheus + kafka-exporter ──▶  Grafana dashboard
+$ curl -s localhost:8080/api/orders/stats
+{"PENDING":0,"FULFILLED":15290,"REJECTED":2665}      # 15290 + 2665 = 17955 exactly
+
+$ psql -c "select count(*) from products where stock_available < 0"
+ 0        # zero SKUs oversold; 69 sold down to exactly 0
 ```
+
+The backlog drained to `PENDING: 0` within 5 s of the load stopping.
+
+**Exactly-once charging** — 200 concurrent `POST /api/payments` with the *same*
+`Idempotency-Key`, verified against the database rather than the API's own counter:
+
+```
+payment rows before=18  after=19          # +1 row from 200 concurrent requests
+rows for this idempotency key: 1          # charged exactly once
+accounts with balance_cents < 0: 0        # never overdrawn
+```
+
+Reproduce both: `loadtest/k6-blast.js` (orders) and the stress loop under
+[Payments ledger](#payments-ledger--charge-exactly-once-the-headline).
+
+---
+
+## Run it in under 2 minutes
+
+```bash
+docker compose up --build
+```
+
+Brings up Postgres, Kafka, both services, kafka-exporter, Prometheus and Grafana,
+and seeds a 200-SKU catalogue on first boot. Then:
+
+```bash
+curl -i -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customerId":"cust-1","sku":"SKU-0007","quantity":2}'   # → 202 Accepted
+
+curl http://localhost:8080/api/orders/stats                     # → fulfilled by the worker
+```
+
+Grafana dashboard at **http://localhost:3000**, ledger console at
+**http://localhost:8080/payments**.
+
+> **Give the Docker VM enough memory** — at least **4 CPU / 8 GB**. On a 2 GB VM
+> Kafka gets OOM-killed under load (`Exited (137)`) and orders stop draining.
+> colima: `colima stop && colima start --cpu 4 --memory 8`. Docker Desktop:
+> Settings → Resources.
+
+---
 
 ## Payments ledger — charge exactly once (the headline)
 
@@ -89,13 +190,10 @@ fire the same idempotency key 50× → exactly **one** outbox row. It's all wire
 registers [the connector](infra/debezium/payments-outbox-connector.json) automatically).
 *(The order path keeps the simpler direct-publish for contrast.)*
 
-## Why it's built this way
+## The other design decisions
 
-- **The API returns `202 Accepted`, not `200`.** It persists the order as `PENDING`
-  and publishes to Kafka — it never waits for inventory. That decoupling is the
-  whole point: the API stays fast and available under a load spike while the
-  workers drain the backlog at their own pace. The lag you see in Grafana *is*
-  that backlog.
+(The headline `202`-vs-`200` decision is [above](#the-key-design-decision-202-accepted-not-200-ok).)
+
 - **Inventory is deducted under a pessimistic row lock**
   (`SELECT … FOR UPDATE`, see [`ProductRepository`](common/src/main/java/com/hermes/common/repository/ProductRepository.java)).
   Many workers can process orders for the same SKU concurrently without
@@ -130,39 +228,13 @@ Three modules: [`common`](common) (entities, repos, the `OrderPlacedEvent`),
 [`order-api`](order-api) (REST + producer), [`fulfillment-worker`](fulfillment-worker)
 (consumer + transactional fulfilment).
 
-## Run it
-
 Everything builds and runs in Docker — no local JDK/Maven needed.
-
-```bash
-docker compose up --build
-```
-
-This brings up Postgres, Kafka, both services, kafka-exporter, Prometheus and
-Grafana. The API seeds a 200-SKU synthetic catalogue on first boot.
-
-> **Give the Docker VM enough memory.** The stack runs Postgres, Kafka, two JVMs,
-> Prometheus and Grafana together — on a 2 GB VM, Kafka gets OOM-killed under load
-> (`Exited (137)`) and orders stop draining. Allocate at least **4 CPU / 8 GB**.
-> On colima: `colima stop && colima start --cpu 4 --memory 8` (resources only
-> apply on a fresh start). Docker Desktop: Settings → Resources.
 
 | Service    | URL                                            |
 |------------|------------------------------------------------|
 | Order API  | http://localhost:8080/api/orders               |
 | Grafana    | http://localhost:3000 (anonymous, or admin/admin) |
 | Prometheus | http://localhost:9090                          |
-
-Place one order:
-
-```bash
-curl -i -X POST http://localhost:8080/api/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"customerId":"cust-1","sku":"SKU-0007","quantity":2}'
-
-# then check it was fulfilled by the worker:
-curl http://localhost:8080/api/orders/stats
-```
 
 ## The demo: blast it and watch the lag
 
